@@ -5,7 +5,6 @@ function loadTokenizerSync() {
 
 	if (request.status === 200) {
 		const tokenizer = JSON.parse(request.responseText);
-		console.log("Tokenizer loaded");
 		return tokenizer;
 	} else {
 		throw new Error("Failed to load tokenizer");
@@ -33,17 +32,34 @@ function ids2text(id) {
 	return r.join(" ");
 }
 
-function sampleMultinomial(probabilities) {
-	const r = Math.random(); // Random float between 0 and 1
-	let cumulativeProbability = 0;
+function sampleMultinomial(probabilities, n = 1) {
+	const len = probabilities.length;
+	const cumulativeProbs = new Float64Array(len);
+	const results = new Uint32Array(n);
 
-	for (let i = 0; i < probabilities.length; i++) {
-		cumulativeProbability += probabilities[i];
-		if (r <= cumulativeProbability) {
-			return i;
-		}
+	let sum = 0;
+	for (let i = 0; i < len; i++) {
+		sum += probabilities[i];
+		cumulativeProbs[i] = sum;
 	}
-	return probabilities.length - 1;
+
+	for (let j = 0; j < n; j++) {
+		const r = Math.random();
+		let low = 0;
+		let high = len - 1;
+
+		while (low < high) {
+			const mid = (low + high) >>> 1;
+			if (r > cumulativeProbs[mid]) {
+				low = mid + 1;
+			} else {
+				high = mid;
+			}
+		}
+		results[j] = low;
+	}
+
+	return results;
 }
 
 function softmax(logits, temperature = 0.5) {
@@ -92,18 +108,37 @@ function toWord(index, tokenizer, skip_oov = False) {
 	return w;
 }
 
+function hasRepeatingBigrams(ids) {
+	const seen = new Set();
+	let c = 0;
+
+	for (let i = 0; i < ids.length - 1; i++) {
+		const bigram = `${ids[i]}|${ids[i + 1]}`;
+
+		if (seen.has(bigram)) {
+			c++;
+			console.log(bigram);
+		}
+
+		if (c > 2) return true;
+
+		seen.add(bigram);
+	}
+
+	return false;
+}
+
 async function greedySearch(
 	session,
 	tokenizer,
 	seedText,
 	maxSteps,
-	temperature,
-	doSampleMultinomial = false
+	temperature
 ) {
 	const stopIdx = 3;
 	let currentSeq = text2ids(cleanText(seedText));
 	const seedSeqLen = currentSeq.length;
-	const maxLen = Math.min(32, seedSeqLen);
+	const maxLen = Math.min(64, seedSeqLen);
 
 	for (let step = 0; step < maxSteps; step++) {
 		const inputBuffer = new Int32Array(maxLen);
@@ -121,19 +156,15 @@ async function greedySearch(
 		let nextToken = 0;
 		let maxLogit = -Infinity;
 
-		if (doSampleMultinomial) {
-			const probs = softmax(outputData, temperature);
-			nextToken = sampleMultinomial(probs);
-		} else {
-			for (let i = 0; i < outputData.length; i++) {
-				if (outputData[i] > maxLogit) {
-					maxLogit = outputData[i];
-					nextToken = i;
-				}
-			}
-		}
+		const probs = softmax(outputData, temperature);
+		nextToken = sampleMultinomial(probs, 1)[0];
 
 		currentSeq.push(nextToken);
+
+		if (hasRepeatingBigrams(currentSeq.slice(seedSeqLen))) {
+			nextToken = stopIdx;
+			currentSeq.push(nextToken);
+		}
 
 		if (nextToken === stopIdx) break;
 	}
@@ -188,7 +219,7 @@ function setChat(conversation) {
 		})
 		.filter((msg) => msg.content.length > 0 && msg.sender.length > 0);
 
-	const htmlOutput = messages
+	let htmlOutput = messages
 		.map(
 			(msg) =>
 				`
@@ -200,6 +231,7 @@ function setChat(conversation) {
 		`
 		)
 		.join("");
+	htmlOutput = `<div style = "height: 100%;"></div>${htmlOutput}`;
 
 	document.getElementById("chat").innerHTML = htmlOutput;
 	const element = document.getElementById("chat");
@@ -211,8 +243,8 @@ const myForm = document.getElementById("main-form");
 
 const resultOutput = document.getElementById("result");
 
-// const loader = document.getElementById("loading");
-// loader.classList.add("d-none");
+const loader = document.getElementById("loading");
+loader.classList.add("d-none");
 
 let conversation = "<sendercattien>";
 
@@ -222,23 +254,24 @@ myForm.addEventListener("submit", function (event) {
 
 	const rawSeedValue = document.getElementById("seedText").value.trim();
 
-	if (rawSeedValue.includes(":3")) startHeartEffect(1);
-	
+	if (rawSeedValue.includes(":3") || rawSeedValue.includes("❤️‍🔥"))
+		startHeartEffect(3);
+
 	document.getElementById("seedText").value = "";
 	const seedValue = conversation + " " + rawSeedValue + " <senderminhtriet>";
 	conversation = seedValue;
 	setChat(conversation);
 
-	const maxSteps = 32;
-	// const temperature = parseFloat(temperatureRangeInput.value);
-	const temperature = 0.1;
+	const maxSteps = 64;
+	const temperature = parseFloat(temperatureRangeInput.value);
+	// const temperature = 0.1;
 	const doSampleMultinomial = true;
 
 	if (rawSeedValue == "") {
 		return;
 	}
 
-	// loader.classList.remove("d-none");
+	loader.classList.remove("d-none");
 
 	let promise = runInference(
 		seedValue,
@@ -247,11 +280,11 @@ myForm.addEventListener("submit", function (event) {
 		doSampleMultinomial
 	);
 	promise.then((result) => {
-		if (result.includes(":3")) startHeartEffect(1);
-		// loader.classList.add("d-none");
+		loader.classList.add("d-none");
+
+		if (result.includes(":3") || result.includes("❤️‍🔥")) startHeartEffect(3);
 
 		conversation = conversation.trim() + " " + result.trim();
-		console.log(conversation);
 
 		// show results
 		setChat(conversation);
@@ -283,11 +316,12 @@ function startHeartEffect(durationInSeconds) {
 		setTimeout(() => {
 			heart.remove();
 		}, 3000);
-	}, 50);
+	}, 300);
 
 	// 2. The Timeout: Stop creating hearts after X seconds
 	setTimeout(() => {
 		clearInterval(heartInterval);
-		console.log("Heart effect stopped.");
 	}, durationInSeconds * 1000);
 }
+
+startHeartEffect(3);
